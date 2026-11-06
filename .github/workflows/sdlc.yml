@@ -1,0 +1,193 @@
+
+name: sdlc
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build --build-arg GITHUB_SHA=${{ github.sha }} -t citybike:${{ github.sha }} .
+
+      - name: Save Docker image
+        run: docker save citybike:${{ github.sha }} -o /tmp/citybike.tar
+
+      - name: Upload Docker image
+        uses: actions/upload-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp/citybike.tar
+
+  staging:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+      - name: Load Docker image
+        run: docker load -i /tmp/citybike.tar
+
+      - name: Staging gate
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          trap 'docker rm -f citybike-gate 2>/dev/null || true' EXIT
+          docker run -d --name citybike-gate -p 4173:4173 \
+            -e APP_ENV=staging citybike:${{ github.sha }}
+          ready=0
+          for i in {1..30}; do
+            if curl -fsS http://localhost:4173/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs citybike-gate
+            exit 1
+          fi
+          TARGET_URL=http://localhost:4173 bash scripts/test-staging.sh
+
+  uat:
+    needs: staging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+      - name: Load Docker image
+        run: docker load -i /tmp/citybike.tar
+
+      - name: UAT gate
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          trap 'docker rm -f citybike-gate 2>/dev/null || true' EXIT
+          docker run -d --name citybike-gate -p 4173:4173 \
+            -e APP_ENV=uat citybike:${{ github.sha }}
+          ready=0
+          for i in {1..30}; do
+            if curl -fsS http://localhost:4173/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs citybike-gate
+            exit 1
+          fi
+          TARGET_URL=http://localhost:4173 bash scripts/test-uat.sh
+
+  oat:
+    needs: uat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+      - name: Load Docker image
+        run: docker load -i /tmp/citybike.tar
+
+      - name: OAT gate
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          trap 'docker rm -f citybike-gate 2>/dev/null || true' EXIT
+          docker run -d --name citybike-gate -p 4173:4173 \
+            -e APP_ENV=oat citybike:${{ github.sha }}
+          ready=0
+          for i in {1..30}; do
+            if curl -fsS http://localhost:4173/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs citybike-gate
+            exit 1
+          fi
+          TARGET_URL=http://localhost:4173 bash scripts/test-oat.sh
+
+  preprod:
+    needs: oat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+      - name: Load Docker image
+        run: docker load -i /tmp/citybike.tar
+
+      - name: Preprod gate
+        env:
+          PROD_API_KEY: ${{ secrets.PROD_API_KEY }}
+          IMAGE_NAME: citybike:${{ github.sha }}
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          trap 'docker rm -f citybike-gate 2>/dev/null || true' EXIT
+          docker run -d --name citybike-gate -p 4173:4173 \
+            -e APP_ENV=preprod \
+            -e PROD_API_KEY \
+            "$IMAGE_NAME"
+          ready=0
+          for i in {1..30}; do
+            if curl -fsS http://localhost:4173/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs citybike-gate
+            exit 1
+          fi
+          TARGET_URL=http://localhost:4173 bash scripts/test-preprod.sh
+
+  prod:
+    needs: preprod
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+      - name: Load Docker image
+        run: docker load -i /tmp/citybike.tar
+
+      - name: Production gate
+        env:
+          PROD_API_KEY: ${{ secrets.PROD_API_KEY }}
+        run: |
+          docker rm -f citybike-gate 2>/dev/null || true
+          trap 'docker rm -f citybike-gate 2>/dev/null || true' EXIT
+          docker run -d --name citybike-gate -p 4173:4173 \
+            -e APP_ENV=production \
+            -e PROD_API_KEY \
+            citybike:${{ github.sha }}
+          ready=0
+          for i in {1..30}; do
+            if curl -fsS http://localhost:4173/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs citybike-gate
+            exit 1
+          fi
+          TARGET_URL=http://localhost:4173 bash scripts/test-prod.sh
