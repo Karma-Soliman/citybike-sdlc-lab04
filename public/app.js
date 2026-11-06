@@ -1,5 +1,5 @@
 'use strict';
-
+// comment 
 const ui = {
   search: document.querySelector('#search'),
   available: document.querySelector('#available-only'),
